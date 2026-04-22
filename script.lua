@@ -34,8 +34,6 @@ local noclipConnection = nil
 -- Player variables
 local godModeEnabled = false
 local godModeConnection = nil
-
--- Client invisibility
 local invisEnabled = false
 
 -- Server invisibility
@@ -428,7 +426,6 @@ localPlayer.CharacterAdded:Connect(function(character)
 		end)
 	end
 
-	-- Turn off server invis on death since character reset
 	if serverInvisEnabled then
 		serverInvisEnabled = false
 		if serverInvisConnection then serverInvisConnection:Disconnect(); serverInvisConnection = nil end
@@ -508,54 +505,71 @@ PlayerTab:CreateToggle({
 		if not root or not humanoid then return end
 
 		if serverInvisEnabled then
-			-- Save where we were standing
+			-- Save current ground position
 			serverInvisOriginalCF = root.CFrame
 
-			-- Initialise camera yaw/pitch from current camera angles
+			-- Get current camera yaw to start from
 			local _, yaw, _ = camera.CFrame:ToEulerAnglesYXZ()
 			serverInvisCameraYaw = math.deg(yaw)
 			serverInvisCameraPitch = 0
 
-			-- Lock camera in scriptable mode at original position
+			-- Take over camera
 			camera.CameraType = Enum.CameraType.Scriptable
 			camera.CFrame = serverInvisOriginalCF
 
-			-- Disable character physics so we can freely move root
-			humanoid.PlatformStand = true
-
-			-- Mouse look: capture delta each frame
+			-- Lock mouse for looking around
 			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
 
+			-- Mouse look delta
 			serverInvisCameraConnection = UserInputService.InputChanged:Connect(function(input)
 				if not serverInvisEnabled then return end
 				if input.UserInputType == Enum.UserInputType.MouseMovement then
-					serverInvisCameraYaw   = serverInvisCameraYaw   - input.Delta.X * 0.3
+					serverInvisCameraYaw   = serverInvisCameraYaw - input.Delta.X * 0.3
 					serverInvisCameraPitch = math.clamp(serverInvisCameraPitch - input.Delta.Y * 0.3, -80, 80)
 				end
 			end)
 
-			-- Every frame: shove character into sky, hold camera at ground, reposition held tools
-			serverInvisConnection = RunService.Heartbeat:Connect(function()
+			serverInvisConnection = RunService.Heartbeat:Connect(function(dt)
 				local character = localPlayer.Character
 				if not character then return end
 				local root = character:FindFirstChild("HumanoidRootPart")
 				if not root then return end
 
-				-- Teleport character body to the sky every frame
-				-- (other players see it up there, not at ground level)
+				-- Build camera CFrame from yaw/pitch so we know look direction
+				local camCFrame = CFrame.new(serverInvisOriginalCF.Position)
+					* CFrame.Angles(0, math.rad(serverInvisCameraYaw), 0)
+					* CFrame.Angles(math.rad(serverInvisCameraPitch), 0, 0)
+
+				-- WASD moves the ground anchor position
+				local moveSpeed = 16
+				local flatLook = Vector3.new(camCFrame.LookVector.X, 0, camCFrame.LookVector.Z)
+				local flatRight = Vector3.new(camCFrame.RightVector.X, 0, camCFrame.RightVector.Z)
+				local moveVector = Vector3.zero
+
+				if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveVector += flatLook.Magnitude > 0 and flatLook.Unit or Vector3.zero end
+				if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveVector -= flatLook.Magnitude > 0 and flatLook.Unit or Vector3.zero end
+				if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveVector -= flatRight.Magnitude > 0 and flatRight.Unit or Vector3.zero end
+				if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveVector += flatRight.Magnitude > 0 and flatRight.Unit or Vector3.zero end
+
+				if moveVector.Magnitude > 0 then
+					local newPos = serverInvisOriginalCF.Position + moveVector.Unit * moveSpeed * dt
+					serverInvisOriginalCF = CFrame.new(newPos)
+				end
+
+				-- Update camera to new position
+				camCFrame = CFrame.new(serverInvisOriginalCF.Position)
+					* CFrame.Angles(0, math.rad(serverInvisCameraYaw), 0)
+					* CFrame.Angles(math.rad(serverInvisCameraPitch), 0, 0)
+				camera.CFrame = camCFrame
+
+				-- Shove character into sky every frame so others can't see it
 				root.CFrame = CFrame.new(
 					serverInvisOriginalCF.Position.X,
 					SKY_HEIGHT,
 					serverInvisOriginalCF.Position.Z
 				)
 
-				-- Keep camera at original ground position with mouse-controlled look
-				local camCFrame = CFrame.new(serverInvisOriginalCF.Position)
-					* CFrame.Angles(0, math.rad(serverInvisCameraYaw), 0)
-					* CFrame.Angles(math.rad(serverInvisCameraPitch), 0, 0)
-				camera.CFrame = camCFrame
-
-				-- Reposition any held tool Handle back near the camera (client side visual)
+				-- Reposition held tool near camera
 				local tool = character:FindFirstChildOfClass("Tool")
 				if tool then
 					local handle = tool:FindFirstChild("Handle")
@@ -566,16 +580,11 @@ PlayerTab:CreateToggle({
 			end)
 
 		else
-			-- Restore everything
 			if serverInvisConnection then serverInvisConnection:Disconnect(); serverInvisConnection = nil end
 			if serverInvisCameraConnection then serverInvisCameraConnection:Disconnect(); serverInvisCameraConnection = nil end
-
 			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-			humanoid.PlatformStand = false
 			camera.CameraType = Enum.CameraType.Custom
 			camera.CameraSubject = humanoid
-
-			-- Bring character back to ground
 			if serverInvisOriginalCF then
 				root.CFrame = serverInvisOriginalCF
 			end
@@ -638,7 +647,6 @@ local function createChatLogGui()
 	listLayout.Padding = UDim.new(0, 2)
 	listLayout.Parent = chatLogScroll
 
-	-- Drag support
 	local dragging = false
 	local dragStart, startPos
 	titleBar.InputBegan:Connect(function(input)
@@ -770,37 +778,59 @@ local teleportDropdown = TeleportTab:CreateDropdown({
 
 selectedTeleportPlayer = getPlayerNames()[1]
 
+local function getTeleportTarget()
+	if not selectedTeleportPlayer or selectedTeleportPlayer == "No players found" then
+		Rayfield:Notify({ Title = "Teleport Failed", Content = "No player selected.", Duration = 3 })
+		return nil, nil
+	end
+	local target = Players:FindFirstChild(selectedTeleportPlayer)
+	if not target then
+		Rayfield:Notify({ Title = "Teleport Failed", Content = selectedTeleportPlayer .. " not found.", Duration = 3 })
+		return nil, nil
+	end
+	local targetChar = target.Character
+	local localChar = localPlayer.Character
+	if not targetChar or not localChar then
+		Rayfield:Notify({ Title = "Teleport Failed", Content = "Character not loaded.", Duration = 3 })
+		return nil, nil
+	end
+	local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+	local localRoot = localChar:FindFirstChild("HumanoidRootPart")
+	if not targetRoot or not localRoot then
+		Rayfield:Notify({ Title = "Teleport Failed", Content = "Could not find root parts.", Duration = 3 })
+		return nil, nil
+	end
+	return targetRoot, localRoot
+end
+
 TeleportTab:CreateButton({
-	Name = "Teleport",
+	Name = "Teleport To Player",
 	Callback = function()
-		if not selectedTeleportPlayer or selectedTeleportPlayer == "No players found" then
-			Rayfield:Notify({ Title = "Teleport Failed", Content = "No player selected.", Duration = 3 })
-			return
-		end
-		local target = Players:FindFirstChild(selectedTeleportPlayer)
-		if not target then
-			Rayfield:Notify({ Title = "Teleport Failed", Content = selectedTeleportPlayer .. " not found.", Duration = 3 })
-			return
-		end
-		local targetChar = target.Character
-		local localChar = localPlayer.Character
-		if not targetChar or not localChar then
-			Rayfield:Notify({ Title = "Teleport Failed", Content = "Character not loaded.", Duration = 3 })
-			return
-		end
-		local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
-		local localRoot = localChar:FindFirstChild("HumanoidRootPart")
-		if not targetRoot or not localRoot then
-			Rayfield:Notify({ Title = "Teleport Failed", Content = "Could not find root parts.", Duration = 3 })
-			return
-		end
-		-- If server invis is on, update the ground anchor position instead of moving root directly
+		local targetRoot, localRoot = getTeleportTarget()
+		if not targetRoot then return end
+		local dest = targetRoot.CFrame * CFrame.new(3, 0, 0)
 		if serverInvisEnabled then
-			serverInvisOriginalCF = targetRoot.CFrame * CFrame.new(3, 0, 0)
+			serverInvisOriginalCF = dest
 		else
-			localRoot.CFrame = targetRoot.CFrame * CFrame.new(3, 0, 0)
+			localRoot.CFrame = dest
 		end
 		Rayfield:Notify({ Title = "Teleported", Content = "Teleported to " .. selectedTeleportPlayer, Duration = 2 })
+	end,
+})
+
+TeleportTab:CreateButton({
+	Name = "Teleport Behind Player",
+	Callback = function()
+		local targetRoot, localRoot = getTeleportTarget()
+		if not targetRoot then return end
+		-- Go 4 studs directly behind them based on their look direction
+		local dest = targetRoot.CFrame * CFrame.new(0, 0, 4)
+		if serverInvisEnabled then
+			serverInvisOriginalCF = dest
+		else
+			localRoot.CFrame = dest
+		end
+		Rayfield:Notify({ Title = "Teleported", Content = "Teleported behind " .. selectedTeleportPlayer, Duration = 2 })
 	end,
 })
 
