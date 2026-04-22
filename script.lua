@@ -39,10 +39,8 @@ local invisEnabled = false
 -- Server invisibility
 local serverInvisEnabled = false
 local serverInvisConnection = nil
-local serverInvisCameraConnection = nil
+local serverInvisAnchor = nil
 local serverInvisOriginalCF = nil
-local serverInvisCameraPitch = 0
-local serverInvisCameraYaw = 0
 local SKY_HEIGHT = 50000
 
 -- Freecam variables
@@ -429,10 +427,8 @@ localPlayer.CharacterAdded:Connect(function(character)
 	if serverInvisEnabled then
 		serverInvisEnabled = false
 		if serverInvisConnection then serverInvisConnection:Disconnect(); serverInvisConnection = nil end
-		if serverInvisCameraConnection then serverInvisCameraConnection:Disconnect(); serverInvisCameraConnection = nil end
-		camera.CameraType = Enum.CameraType.Custom
+		if serverInvisAnchor then serverInvisAnchor:Destroy(); serverInvisAnchor = nil end
 		camera.CameraSubject = character:WaitForChild("Humanoid")
-		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 	end
 
 	if flyEnabled then
@@ -505,29 +501,23 @@ PlayerTab:CreateToggle({
 		if not root or not humanoid then return end
 
 		if serverInvisEnabled then
-			-- Save current ground position
 			serverInvisOriginalCF = root.CFrame
 
-			-- Get current camera yaw to start from
-			local _, yaw, _ = camera.CFrame:ToEulerAnglesYXZ()
-			serverInvisCameraYaw = math.deg(yaw)
-			serverInvisCameraPitch = 0
+			-- KEY FIX: Create an invisible anchored part at ground level
+			-- and set it as the camera subject instead of using Scriptable mode
+			-- This keeps normal third person camera without going first person
+			serverInvisAnchor = Instance.new("Part")
+			serverInvisAnchor.Name = "InvisAnchor"
+			serverInvisAnchor.Anchored = true
+			serverInvisAnchor.CanCollide = false
+			serverInvisAnchor.CanTouch = false
+			serverInvisAnchor.Transparency = 1
+			serverInvisAnchor.Size = Vector3.new(1, 1, 1)
+			serverInvisAnchor.CFrame = serverInvisOriginalCF
+			serverInvisAnchor.Parent = workspace
 
-			-- Take over camera
-			camera.CameraType = Enum.CameraType.Scriptable
-			camera.CFrame = serverInvisOriginalCF
-
-			-- Lock mouse for looking around
-			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-
-			-- Mouse look delta
-			serverInvisCameraConnection = UserInputService.InputChanged:Connect(function(input)
-				if not serverInvisEnabled then return end
-				if input.UserInputType == Enum.UserInputType.MouseMovement then
-					serverInvisCameraYaw   = serverInvisCameraYaw - input.Delta.X * 0.3
-					serverInvisCameraPitch = math.clamp(serverInvisCameraPitch - input.Delta.Y * 0.3, -80, 80)
-				end
-			end)
+			-- Camera follows the anchor naturally in third person
+			camera.CameraSubject = serverInvisAnchor
 
 			serverInvisConnection = RunService.Heartbeat:Connect(function(dt)
 				local character = localPlayer.Character
@@ -535,34 +525,25 @@ PlayerTab:CreateToggle({
 				local root = character:FindFirstChild("HumanoidRootPart")
 				if not root then return end
 
-				-- Build camera CFrame from yaw/pitch so we know look direction
-				local camCFrame = CFrame.new(serverInvisOriginalCF.Position)
-					* CFrame.Angles(0, math.rad(serverInvisCameraYaw), 0)
-					* CFrame.Angles(math.rad(serverInvisCameraPitch), 0, 0)
-
-				-- WASD moves the ground anchor position
+				-- Move anchor with WASD relative to camera direction
 				local moveSpeed = 16
+				local camCFrame = camera.CFrame
 				local flatLook = Vector3.new(camCFrame.LookVector.X, 0, camCFrame.LookVector.Z)
 				local flatRight = Vector3.new(camCFrame.RightVector.X, 0, camCFrame.RightVector.Z)
 				local moveVector = Vector3.zero
 
-				if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveVector += flatLook.Magnitude > 0 and flatLook.Unit or Vector3.zero end
-				if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveVector -= flatLook.Magnitude > 0 and flatLook.Unit or Vector3.zero end
-				if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveVector -= flatRight.Magnitude > 0 and flatRight.Unit or Vector3.zero end
-				if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveVector += flatRight.Magnitude > 0 and flatRight.Unit or Vector3.zero end
+				if UserInputService:IsKeyDown(Enum.KeyCode.W) and flatLook.Magnitude > 0 then moveVector += flatLook.Unit end
+				if UserInputService:IsKeyDown(Enum.KeyCode.S) and flatLook.Magnitude > 0 then moveVector -= flatLook.Unit end
+				if UserInputService:IsKeyDown(Enum.KeyCode.A) and flatRight.Magnitude > 0 then moveVector -= flatRight.Unit end
+				if UserInputService:IsKeyDown(Enum.KeyCode.D) and flatRight.Magnitude > 0 then moveVector += flatRight.Unit end
 
 				if moveVector.Magnitude > 0 then
-					local newPos = serverInvisOriginalCF.Position + moveVector.Unit * moveSpeed * dt
-					serverInvisOriginalCF = CFrame.new(newPos)
+					local newPos = serverInvisAnchor.CFrame.Position + moveVector.Unit * moveSpeed * dt
+					serverInvisAnchor.CFrame = CFrame.new(newPos)
+					serverInvisOriginalCF = serverInvisAnchor.CFrame
 				end
 
-				-- Update camera to new position
-				camCFrame = CFrame.new(serverInvisOriginalCF.Position)
-					* CFrame.Angles(0, math.rad(serverInvisCameraYaw), 0)
-					* CFrame.Angles(math.rad(serverInvisCameraPitch), 0, 0)
-				camera.CFrame = camCFrame
-
-				-- Shove character into sky every frame so others can't see it
+				-- Shove character into sky every frame
 				root.CFrame = CFrame.new(
 					serverInvisOriginalCF.Position.X,
 					SKY_HEIGHT,
@@ -581,9 +562,7 @@ PlayerTab:CreateToggle({
 
 		else
 			if serverInvisConnection then serverInvisConnection:Disconnect(); serverInvisConnection = nil end
-			if serverInvisCameraConnection then serverInvisCameraConnection:Disconnect(); serverInvisCameraConnection = nil end
-			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-			camera.CameraType = Enum.CameraType.Custom
+			if serverInvisAnchor then serverInvisAnchor:Destroy(); serverInvisAnchor = nil end
 			camera.CameraSubject = humanoid
 			if serverInvisOriginalCF then
 				root.CFrame = serverInvisOriginalCF
@@ -811,6 +790,7 @@ TeleportTab:CreateButton({
 		local dest = targetRoot.CFrame * CFrame.new(3, 0, 0)
 		if serverInvisEnabled then
 			serverInvisOriginalCF = dest
+			if serverInvisAnchor then serverInvisAnchor.CFrame = dest end
 		else
 			localRoot.CFrame = dest
 		end
@@ -823,10 +803,10 @@ TeleportTab:CreateButton({
 	Callback = function()
 		local targetRoot, localRoot = getTeleportTarget()
 		if not targetRoot then return end
-		-- Go 4 studs directly behind them based on their look direction
 		local dest = targetRoot.CFrame * CFrame.new(0, 0, 4)
 		if serverInvisEnabled then
 			serverInvisOriginalCF = dest
+			if serverInvisAnchor then serverInvisAnchor.CFrame = dest end
 		else
 			localRoot.CFrame = dest
 		end
@@ -950,23 +930,36 @@ local function getClosestTarget()
 	local closestPlayer = nil
 	local closestDistance = fovRadius
 	local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player == localPlayer then continue end
 		if isTeammate(player) then continue end
+
 		local character = player.Character
 		if not character then continue end
+
 		local targetPart = character:FindFirstChild(aimAtPart)
 		local humanoid = character:FindFirstChild("Humanoid")
 		if not targetPart or not humanoid or humanoid.Health <= 0 then continue end
+
 		local offsetPosition = targetPart.Position + Vector3.new(0, verticalOffset, 0)
-		local screenPos, onScreen = camera:WorldToViewportPoint(offsetPosition)
-		if not onScreen then continue end
+
+		-- KEY FIX: removed onScreen check — Bloxstrike's ADS changes FOV
+		-- which makes onScreen return false even for visible players.
+		-- Instead we check if the player is in front of the camera using dot product
+		-- then use raw screen pixel distance from center.
+		local toTarget = (offsetPosition - camera.CFrame.Position)
+		if toTarget:Dot(camera.CFrame.LookVector) < 0 then continue end -- behind camera, skip
+
+		local screenPos = camera:WorldToViewportPoint(offsetPosition)
 		local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+
 		if dist < closestDistance then
 			closestDistance = dist
 			closestPlayer = player
 		end
 	end
+
 	return closestPlayer
 end
 
