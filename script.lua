@@ -18,6 +18,7 @@ local aimAtPart = "HumanoidRootPart"
 local showFOVCircle = false
 local verticalOffset = 2
 local skipTeammates = false
+local aimKey = "MouseButton2" -- default right click
 
 local fovCircleGui = nil
 local fovCircleFrame = nil
@@ -167,6 +168,18 @@ AimTab:CreateToggle({
 	Flag = "SkipTeammatesToggle",
 	Callback = function(value)
 		skipTeammates = value
+	end,
+})
+
+AimTab:CreateSection("Keybind")
+
+AimTab:CreateDropdown({
+	Name = "Aim Key",
+	Options = {"MouseButton2", "F", "Q", "E", "V", "G", "H", "T"},
+	CurrentOption = {"MouseButton2"},
+	Flag = "AimKeyDropdown",
+	Callback = function(selected)
+		aimKey = selected[1]
 	end,
 })
 
@@ -503,9 +516,6 @@ PlayerTab:CreateToggle({
 		if serverInvisEnabled then
 			serverInvisOriginalCF = root.CFrame
 
-			-- KEY FIX: Create an invisible anchored part at ground level
-			-- and set it as the camera subject instead of using Scriptable mode
-			-- This keeps normal third person camera without going first person
 			serverInvisAnchor = Instance.new("Part")
 			serverInvisAnchor.Name = "InvisAnchor"
 			serverInvisAnchor.Anchored = true
@@ -516,7 +526,6 @@ PlayerTab:CreateToggle({
 			serverInvisAnchor.CFrame = serverInvisOriginalCF
 			serverInvisAnchor.Parent = workspace
 
-			-- Camera follows the anchor naturally in third person
 			camera.CameraSubject = serverInvisAnchor
 
 			serverInvisConnection = RunService.Heartbeat:Connect(function(dt)
@@ -525,7 +534,6 @@ PlayerTab:CreateToggle({
 				local root = character:FindFirstChild("HumanoidRootPart")
 				if not root then return end
 
-				-- Move anchor with WASD relative to camera direction
 				local moveSpeed = 16
 				local camCFrame = camera.CFrame
 				local flatLook = Vector3.new(camCFrame.LookVector.X, 0, camCFrame.LookVector.Z)
@@ -543,14 +551,12 @@ PlayerTab:CreateToggle({
 					serverInvisOriginalCF = serverInvisAnchor.CFrame
 				end
 
-				-- Shove character into sky every frame
 				root.CFrame = CFrame.new(
 					serverInvisOriginalCF.Position.X,
 					SKY_HEIGHT,
 					serverInvisOriginalCF.Position.Z
 				)
 
-				-- Reposition held tool near camera
 				local tool = character:FindFirstChildOfClass("Tool")
 				if tool then
 					local handle = tool:FindFirstChild("Handle")
@@ -559,7 +565,6 @@ PlayerTab:CreateToggle({
 					end
 				end
 			end)
-
 		else
 			if serverInvisConnection then serverInvisConnection:Disconnect(); serverInvisConnection = nil end
 			if serverInvisAnchor then serverInvisAnchor:Destroy(); serverInvisAnchor = nil end
@@ -923,6 +928,22 @@ local function isTeammate(player)
 end
 
 -- =====================
+--   AIM KEY CHECK
+-- =====================
+
+local function isAimKeyDown()
+	if aimKey == "MouseButton2" then
+		return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+	else
+		local keyEnum = Enum.KeyCode[aimKey]
+		if keyEnum then
+			return UserInputService:IsKeyDown(keyEnum)
+		end
+	end
+	return false
+end
+
+-- =====================
 --   AIM ASSIST LOGIC
 -- =====================
 
@@ -944,12 +965,8 @@ local function getClosestTarget()
 
 		local offsetPosition = targetPart.Position + Vector3.new(0, verticalOffset, 0)
 
-		-- KEY FIX: removed onScreen check — Bloxstrike's ADS changes FOV
-		-- which makes onScreen return false even for visible players.
-		-- Instead we check if the player is in front of the camera using dot product
-		-- then use raw screen pixel distance from center.
 		local toTarget = (offsetPosition - camera.CFrame.Position)
-		if toTarget:Dot(camera.CFrame.LookVector) < 0 then continue end -- behind camera, skip
+		if toTarget:Dot(camera.CFrame.LookVector) < 0 then continue end
 
 		local screenPos = camera:WorldToViewportPoint(offsetPosition)
 		local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
@@ -970,7 +987,7 @@ RunService:BindToRenderStep("AimAssist", Enum.RenderPriority.Camera.Value + 1, f
 		fovCircleFrame.Position = UDim2.new(0.5, -fovRadius, 0.5, -fovRadius)
 	end
 	if not aimAssistEnabled then return end
-	if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+	if not isAimKeyDown() then return end
 	local target = getClosestTarget()
 	if not target then return end
 	local character = target.Character
