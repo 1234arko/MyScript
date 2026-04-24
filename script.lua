@@ -3,7 +3,7 @@ task.wait(1)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local localPlayer = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
@@ -18,7 +18,7 @@ local aimAtPart = "HumanoidRootPart"
 local showFOVCircle = false
 local verticalOffset = 2
 local skipTeammates = false
-local aimKey = "MouseButton2" -- default right click
+local aimKey = "MouseButton2"
 
 local fovCircleGui = nil
 local fovCircleFrame = nil
@@ -34,8 +34,13 @@ local noclipConnection = nil
 
 -- Player variables
 local godModeEnabled = false
-local godModeConnection = nil
 local invisEnabled = false
+
+-- Reach variables
+local reachEnabled = false
+local reachSize = 10
+local reachConnection = nil
+local originalHandleSizes = {}
 
 -- Server invisibility
 local serverInvisEnabled = false
@@ -59,6 +64,9 @@ local chatLogFrame = nil
 local chatLogScroll = nil
 local chatMessages = {}
 local playerChatConnections = {}
+
+-- God mode remote
+local godModeRemote = ReplicatedStorage:WaitForChild("GodModeRemote", 10)
 
 -- =====================
 --   RAYFIELD UI
@@ -429,14 +437,6 @@ localPlayer.CharacterAdded:Connect(function(character)
 		end)
 	end
 
-	if godModeEnabled then
-		if godModeConnection then godModeConnection:Disconnect() end
-		local newHumanoid = character:WaitForChild("Humanoid")
-		godModeConnection = newHumanoid.HealthChanged:Connect(function()
-			if godModeEnabled then newHumanoid.Health = newHumanoid.MaxHealth end
-		end)
-	end
-
 	if serverInvisEnabled then
 		serverInvisEnabled = false
 		if serverInvisConnection then serverInvisConnection:Disconnect(); serverInvisConnection = nil end
@@ -458,7 +458,7 @@ end)
 
 local PlayerTab = Window:CreateTab("Player", 4483362458)
 
-PlayerTab:CreateSection("God Mode")
+PlayerTab:CreateSection("God Mode (Server Side)")
 
 PlayerTab:CreateToggle({
 	Name = "Enable God Mode",
@@ -466,17 +466,19 @@ PlayerTab:CreateToggle({
 	Flag = "GodModeToggle",
 	Callback = function(value)
 		godModeEnabled = value
-		local character = localPlayer.Character
-		if not character then return end
-		local humanoid = character:FindFirstChild("Humanoid")
-		if not humanoid then return end
-		if godModeEnabled then
-			humanoid.Health = humanoid.MaxHealth
-			godModeConnection = humanoid.HealthChanged:Connect(function()
-				if godModeEnabled then humanoid.Health = humanoid.MaxHealth end
-			end)
+		if godModeRemote then
+			godModeRemote:FireServer(value)
+			Rayfield:Notify({
+				Title = "God Mode",
+				Content = value and "God Mode ON — health set to infinite on server" or "God Mode OFF — health restored",
+				Duration = 3,
+			})
 		else
-			if godModeConnection then godModeConnection:Disconnect(); godModeConnection = nil end
+			Rayfield:Notify({
+				Title = "God Mode Failed",
+				Content = "GodModeRemote not found in ReplicatedStorage. Make sure the server script is installed.",
+				Duration = 5,
+			})
 		end
 	end,
 })
@@ -515,7 +517,6 @@ PlayerTab:CreateToggle({
 
 		if serverInvisEnabled then
 			serverInvisOriginalCF = root.CFrame
-
 			serverInvisAnchor = Instance.new("Part")
 			serverInvisAnchor.Name = "InvisAnchor"
 			serverInvisAnchor.Anchored = true
@@ -525,7 +526,6 @@ PlayerTab:CreateToggle({
 			serverInvisAnchor.Size = Vector3.new(1, 1, 1)
 			serverInvisAnchor.CFrame = serverInvisOriginalCF
 			serverInvisAnchor.Parent = workspace
-
 			camera.CameraSubject = serverInvisAnchor
 
 			serverInvisConnection = RunService.Heartbeat:Connect(function(dt)
@@ -569,10 +569,77 @@ PlayerTab:CreateToggle({
 			if serverInvisConnection then serverInvisConnection:Disconnect(); serverInvisConnection = nil end
 			if serverInvisAnchor then serverInvisAnchor:Destroy(); serverInvisAnchor = nil end
 			camera.CameraSubject = humanoid
-			if serverInvisOriginalCF then
-				root.CFrame = serverInvisOriginalCF
-			end
+			if serverInvisOriginalCF then root.CFrame = serverInvisOriginalCF end
 		end
+	end,
+})
+
+PlayerTab:CreateSection("Reach")
+
+PlayerTab:CreateToggle({
+	Name = "Enable Reach",
+	CurrentValue = false,
+	Flag = "ReachToggle",
+	Callback = function(value)
+		reachEnabled = value
+
+		if reachEnabled then
+			-- Every frame find the equipped tool and expand its handle
+			reachConnection = RunService.Heartbeat:Connect(function()
+				local character = localPlayer.Character
+				if not character then return end
+				local tool = character:FindFirstChildOfClass("Tool")
+				if not tool then return end
+				local handle = tool:FindFirstChild("Handle")
+				if not handle then return end
+
+				-- Save original size once per tool
+				if not originalHandleSizes[tool] then
+					originalHandleSizes[tool] = handle.Size
+				end
+
+				-- For melee: expand handle hitbox so Touched fires at greater range
+				-- For ranged: move handle forward so raycast origin is further out
+				handle.Size = Vector3.new(
+					originalHandleSizes[tool].X,
+					originalHandleSizes[tool].Y,
+					reachSize -- extend Z axis (forward reach)
+				)
+
+				-- Offset the handle forward so the extension goes in front not behind
+				local root = character:FindFirstChild("HumanoidRootPart")
+				if root then
+					handle.CFrame = root.CFrame * CFrame.new(0, 0, -(reachSize / 2))
+				end
+			end)
+		else
+			if reachConnection then reachConnection:Disconnect(); reachConnection = nil end
+
+			-- Restore all saved handle sizes
+			local character = localPlayer.Character
+			if character then
+				local tool = character:FindFirstChildOfClass("Tool")
+				if tool then
+					local handle = tool:FindFirstChild("Handle")
+					if handle and originalHandleSizes[tool] then
+						handle.Size = originalHandleSizes[tool]
+					end
+				end
+			end
+			originalHandleSizes = {}
+		end
+	end,
+})
+
+PlayerTab:CreateSlider({
+	Name = "Reach Distance",
+	Range = {5, 100},
+	Increment = 1,
+	Suffix = " studs",
+	CurrentValue = 10,
+	Flag = "ReachSlider",
+	Callback = function(value)
+		reachSize = value
 	end,
 })
 
@@ -936,9 +1003,7 @@ local function isAimKeyDown()
 		return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
 	else
 		local keyEnum = Enum.KeyCode[aimKey]
-		if keyEnum then
-			return UserInputService:IsKeyDown(keyEnum)
-		end
+		if keyEnum then return UserInputService:IsKeyDown(keyEnum) end
 	end
 	return false
 end
@@ -949,8 +1014,11 @@ end
 
 local function getClosestTarget()
 	local closestPlayer = nil
-	local closestDistance = fovRadius
-	local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+	local smallestAngle = math.huge
+
+	local halfFov = math.rad(camera.FieldOfView / 2)
+	local pixelsPerRad = (camera.ViewportSize.Y / 2) / math.tan(halfFov)
+	local angleThreshold = math.atan(fovRadius / pixelsPerRad)
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player == localPlayer then continue end
@@ -964,15 +1032,13 @@ local function getClosestTarget()
 		if not targetPart or not humanoid or humanoid.Health <= 0 then continue end
 
 		local offsetPosition = targetPart.Position + Vector3.new(0, verticalOffset, 0)
-
-		local toTarget = (offsetPosition - camera.CFrame.Position)
+		local toTarget = offsetPosition - camera.CFrame.Position
 		if toTarget:Dot(camera.CFrame.LookVector) < 0 then continue end
 
-		local screenPos = camera:WorldToViewportPoint(offsetPosition)
-		local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+		local angle = math.acos(math.clamp(toTarget.Unit:Dot(camera.CFrame.LookVector), -1, 1))
 
-		if dist < closestDistance then
-			closestDistance = dist
+		if angle < angleThreshold and angle < smallestAngle then
+			smallestAngle = angle
 			closestPlayer = player
 		end
 	end
@@ -980,20 +1046,26 @@ local function getClosestTarget()
 	return closestPlayer
 end
 
-RunService:BindToRenderStep("AimAssist", Enum.RenderPriority.Camera.Value + 1, function()
+RunService:BindToRenderStep("AimAssist", Enum.RenderPriority.Last.Value, function()
 	if showFOVCircle and fovCircleFrame then
 		local size = fovRadius * 2
 		fovCircleFrame.Size = UDim2.new(0, size, 0, size)
 		fovCircleFrame.Position = UDim2.new(0.5, -fovRadius, 0.5, -fovRadius)
 	end
+
 	if not aimAssistEnabled then return end
-	if not isAimKeyDown() then return end
+	-- Uncomment below to require key hold:
+	-- if not isAimKeyDown() then return end
+
 	local target = getClosestTarget()
 	if not target then return end
+
 	local character = target.Character
 	if not character then return end
+
 	local targetPart = character:FindFirstChild(aimAtPart)
 	if not targetPart then return end
+
 	local alpha = math.clamp(aimStrength / 30, 0.001, 1)
 	local aimPosition = targetPart.Position + Vector3.new(0, verticalOffset, 0)
 	local currentCFrame = camera.CFrame
